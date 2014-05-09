@@ -1,4 +1,4 @@
-package org.apache.cassandra.io.aio;
+package org.apache.cassandra.aio;
 
 import java.io.IOException;
 import java.nio.file.FileStore;

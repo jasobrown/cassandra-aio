@@ -1,4 +1,4 @@
-package org.apache.cassandra.io.aio;
+package org.apache.cassandra.aio;
 
 public class AsyncFileException extends Exception
 {
