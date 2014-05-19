@@ -1,6 +1,11 @@
 package org.apache.cassandra.aio;
 
-public class AsyncFileException extends Exception
-{
+import java.io.IOException;
 
+public class AsyncFileException extends IOException
+{
+    public AsyncFileException(String s)
+    {
+        super(s);
+    }
 }

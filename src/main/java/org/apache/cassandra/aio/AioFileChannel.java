@@ -21,16 +21,9 @@ public class AioFileChannel extends AsynchronousFileChannel
 {
     private static final Logger logger = LoggerFactory.getLogger(AioFileChannel.class);
 
-    /**
-     * This definition needs to match Version.h on the native sources.
-     * <p/>
-     * Or else the native module won't be loaded because of version mismatches
-     */
-    private static final int EXPECTED_NATIVE_VERSION = 1;
-
     static
     {
-        final String[] libraries = new String[]{ "CassandraAIO64", "CassandraAIO32" };
+        final String[] libraries = new String[]{ "cassandra-aio" };
         boolean loaded = false;
         for (String library : libraries)
         {
@@ -38,10 +31,6 @@ public class AioFileChannel extends AsynchronousFileChannel
             {
                 loaded = true;
                 break;
-            }
-            else
-            {
-                logger.debug("native library " + library + " not found!");
             }
         }
         if (!loaded)
@@ -56,19 +45,11 @@ public class AioFileChannel extends AsynchronousFileChannel
         {
             logger.debug("native libray being loaded: {}", name);
             System.loadLibrary(name);
-            if (getNativeVersion() != EXPECTED_NATIVE_VERSION)
-            {
-                logger.debug("native library {} not at expected version", name);
-                return false;
-            }
-            else
-            {
-                return true;
-            }
+            return true;
         }
         catch (Throwable e)
         {
-            logger.debug("error loading the native library " + name, e);
+            logger.debug("error loading the native library " + name);
             return false;
         }
     }
@@ -94,11 +75,9 @@ public class AioFileChannel extends AsynchronousFileChannel
 
     private volatile Runnable poller;
 
-    /**
-     * Pointer the the controller in c-land.
-     * Warning: Beware of the pointer! It will bite you! :-)
-     */
-    private ByteBuffer handler;
+
+    private final int fd;
+    private final int epollFd;
 
 //    private final Executor pollerExecutor;
 
@@ -108,8 +87,6 @@ public class AioFileChannel extends AsynchronousFileChannel
      * We use this {@link java.util.PriorityQueue} to hold values until they are in order
      */
 //    private final PriorityQueue<CallbackHolder> pendingCallbacks = new PriorityQueue<CallbackHolder>();
-
-
 
     public AioFileChannel(Path path, Set<? extends OpenOption> options) throws IOException
     {
@@ -121,7 +98,13 @@ public class AioFileChannel extends AsynchronousFileChannel
 
         try
         {
-            handler = init(this.getClass(), fileName, maxIO, logger);
+            fd = open0(fileName, maxIO);
+            if (-1 == fd)
+            {
+                throw new AsyncFileException("Could not open file " + fileName);
+            }
+
+            epollFd = epollCreate();
         }
         catch (AsyncFileException e)
         {
@@ -133,7 +116,7 @@ public class AioFileChannel extends AsynchronousFileChannel
     public long size() throws IOException
     {
         checkOpened();
-        return size0(handler);
+        return size0(fd);
     }
 
     public boolean isOpen()
@@ -209,26 +192,27 @@ public class AioFileChannel extends AsynchronousFileChannel
 //            pollerLatch.await();
 //        }
 
-        if (handler != null)
-        {
-            closeInternal(handler);
-        }
+        int ret = close0(fd);
+        if (ret < 0)
+            logger.warn("problem while closing the file " + fileName + ". ignoring, but error code " + ret);
+        ret = closeEpoll(epollFd);
+        if (ret < 0)
+            logger.warn("problem while closing epoll context, but ignoring ");
     }
 
     /* Native methods */
-    /** A native method that does nothing, and just validate if the ELF dependencies are loaded and on the correct platform as this binary format */
-    protected static native int getNativeVersion();
+    protected native int epollCreate() throws AsyncFileException;
+    protected native int open0(String fileName, int maxIO);
 
-    protected native ByteBuffer init(Class controllerClass, String fileName, int maxIO, Object logger) throws AsyncFileException;
-
-    protected native long size0(ByteBuffer handle);
+    protected native long size0(int fd);
 
     /**
      *This is using org.hornetq.core.asyncio.AIOCallback
      */
-    protected native void read(Object thisObject, ByteBuffer handle, long position, long size, ByteBuffer buffer, Object aioPackageCallback) throws AsyncFileException;
+    protected native void read0(Object thisObject, ByteBuffer handle, long position, long size, ByteBuffer buffer, Object aioPackageCallback) throws AsyncFileException;
 
-    protected native void closeInternal(ByteBuffer handler);
+    protected native int close0(int fd);
+    protected native int closeEpoll(int epollFd);
 
 //    protected native ByteBuffer newNativeBuffer(long size);
 //    protected native void resetBuffer(ByteBuffer directByteBuffer, int size);

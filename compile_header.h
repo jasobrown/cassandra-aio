@@ -5,4 +5,4 @@
 ###
 
 cd ./target/classes/
-javah -d /usr/local/src/cassandra-aio/src/main/c  org.apache.cassandra.aio.AioFileChannel
+javah -d /tmp  org.apache.cassandra.aio.AioFileChannel
