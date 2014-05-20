@@ -29,6 +29,7 @@ public class DelegateFileSystem extends FileSystem
 
     public void close() throws IOException
     {
+        AioFileChannelFactory.INSTANCE.close();
         delegate.close();
     }
 

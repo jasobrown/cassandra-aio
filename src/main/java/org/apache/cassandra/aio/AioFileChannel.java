@@ -1,5 +1,6 @@
 package org.apache.cassandra.aio;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.AsynchronousFileChannel;
@@ -8,11 +9,13 @@ import java.nio.channels.FileLock;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,7 +46,6 @@ public class AioFileChannel extends AsynchronousFileChannel
     {
         try
         {
-            logger.debug("native libray being loaded: {}", name);
             System.loadLibrary(name);
             return true;
         }
@@ -56,55 +58,28 @@ public class AioFileChannel extends AsynchronousFileChannel
 
     private final String fileName;
     private final Semaphore maxIOSemaphore;
-    private final int maxIO;
-
-    /**
-     * Used to determine the next writing sequence.
-     * This is accessed from a single thread (the Poller Thread)
-     */
-    private volatile long nextReadSequence = 0;
-
+    private static final AtomicLong idGen = new AtomicLong(0);
     private volatile boolean opened = false;
+    private ByteBuffer aioContext;
 
-    /**
-     * Used while inside the callbackDone and callbackError
-     */
-    private final Lock callbackLock = new ReentrantLock();
-
-//    private final ReusableLatch pollerLatch = new ReusableLatch();
-
-    private volatile Runnable poller;
-
-
-    private final int fd;
     private final int epollFd;
 
-//    private final Executor pollerExecutor;
-
-    /**
-     * AIO can't guarantee ordering over callbacks.
-     * <p/>
-     * We use this {@link java.util.PriorityQueue} to hold values until they are in order
-     */
-//    private final PriorityQueue<CallbackHolder> pendingCallbacks = new PriorityQueue<CallbackHolder>();
-
-    public AioFileChannel(Path path, Set<? extends OpenOption> options) throws IOException
+    public AioFileChannel(Path path, Set<? extends OpenOption> options, int epollFd) throws IOException
     {
         assert !options.contains(StandardOpenOption.WRITE) : "not supporting writing with async i/o";
         //TODO: give this a legit value
-        this.maxIO = 42;
-        maxIOSemaphore = new Semaphore(this.maxIO);
+        int maxIO = 42;
+        this.epollFd = epollFd;
+        maxIOSemaphore = new Semaphore(maxIO);
         this.fileName = path.toFile().getAbsolutePath();
 
         try
         {
-            fd = open0(fileName, maxIO);
-            if (-1 == fd)
+            aioContext = Native.createAioContext(fileName, epollFd, maxIO);
+            if (aioContext == null)
             {
                 throw new AsyncFileException("Could not open file " + fileName);
             }
-
-            epollFd = epollCreate();
         }
         catch (AsyncFileException e)
         {
@@ -116,7 +91,7 @@ public class AioFileChannel extends AsynchronousFileChannel
     public long size() throws IOException
     {
         checkOpened();
-        return size0(fd);
+        return Native.size0(aioContext);
     }
 
     public boolean isOpen()
@@ -167,16 +142,37 @@ public class AioFileChannel extends AsynchronousFileChannel
         throw new UnsupportedOperationException("not supporting writes yet in async i/o");
     }
 
-    public <A> void read(ByteBuffer dst, long position, A attachment, CompletionHandler<Integer, ? super A> handler)
-    {
-        checkOpened();
-
-    }
-
     public Future<Integer> read(ByteBuffer dst, long position)
     {
+        throw new UnsupportedOperationException("not supporting this read() method yet");
+    }
+
+    public <A> void read(ByteBuffer dst, long position, final A attachment, final CompletionHandler<Integer, ? super A> handler)
+    {
         checkOpened();
-        return null;
+        //fabricate some identifier....
+        Long id = idGen.incrementAndGet();
+        maxIOSemaphore.acquireUninterruptibly();
+        try
+        {
+            AioFileChannelFactory.INSTANCE.submitted.put(id, new CompletionWrapper<CountDownLatch>((CountDownLatch)attachment,
+                                                                    (CompletionHandler<Integer, CountDownLatch>)handler));
+            int cnt = Native.read0(aioContext, id, dst, position, dst.capacity());
+            if (cnt != 1)
+            {
+                AioFileChannelFactory.INSTANCE.submitted.remove(id);
+                throw new RuntimeException("could not submit read request for file " + fileName);
+            }
+        }
+        catch (Exception e)
+        {
+            AioFileChannelFactory.INSTANCE.submitted.remove(id);
+            handler.failed(e, attachment);
+        }
+        finally
+        {
+            maxIOSemaphore.release();
+        }
     }
 
     public void close() throws IOException
@@ -184,41 +180,14 @@ public class AioFileChannel extends AsynchronousFileChannel
         if (!opened)
             return;
         opened = false;
-//        if (poller != null)
-//        {
-//            stopPoller(handler);
-//            // We need to make sure we won't call close until Poller is
-//            // completely done, or we might get beautiful GPFs
-//            pollerLatch.await();
-//        }
 
-        int ret = close0(fd);
+        int ret = Native.destroyAioContext(aioContext);
         if (ret < 0)
             logger.warn("problem while closing the file " + fileName + ". ignoring, but error code " + ret);
-        ret = closeEpoll(epollFd);
-        if (ret < 0)
-            logger.warn("problem while closing epoll context, but ignoring ");
+
+        //TODO: check if we can simply null the BB here, or if any other magic needs to happen
+        aioContext = null;
+
+        AioFileChannelFactory.INSTANCE.close(new File(fileName).toPath());
     }
-
-    /* Native methods */
-    protected native int epollCreate() throws AsyncFileException;
-    protected native int open0(String fileName, int maxIO);
-
-    protected native long size0(int fd);
-
-    /**
-     *This is using org.hornetq.core.asyncio.AIOCallback
-     */
-    protected native void read0(Object thisObject, ByteBuffer handle, long position, long size, ByteBuffer buffer, Object aioPackageCallback) throws AsyncFileException;
-
-    protected native int close0(int fd);
-    protected native int closeEpoll(int epollFd);
-
-//    protected native ByteBuffer newNativeBuffer(long size);
-//    protected native void resetBuffer(ByteBuffer directByteBuffer, int size);
-//    protected native void destroyBuffer(ByteBuffer buffer);
-
-//    /** Poll asynchronous events from internal queues */
-//    protected native void internalPollEvents(ByteBuffer handler);
-//    protected native void stopPoller(ByteBuffer handler);
 }

@@ -114,7 +114,7 @@ public class DelegateFileSystemProvider extends FileSystemProvider
 
     public AsynchronousFileChannel newAsynchronousFileChannel(Path path, Set<? extends OpenOption> options, ExecutorService executor, FileAttribute<?>... attrs) throws IOException
     {
-        return new AioFileChannel(path, options);
+        return AioFileChannelFactory.INSTANCE.newAioFileChannel(path, options);
     }
 
     public SeekableByteChannel newByteChannel(Path path, Set<? extends OpenOption> options, FileAttribute<?>... attrs) throws IOException
